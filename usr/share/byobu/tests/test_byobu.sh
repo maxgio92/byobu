@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # test_byobu.sh — unit tests for byobu core utilities
 #
 # Runs without a live tmux/screen session.  All tests are self-contained:
@@ -283,7 +283,7 @@ _batt_sign() {
 	case "$1" in
 		charging)            echo "+" ;;
 		discharging)         echo "-" ;;
-		charged|unknown|full) echo "=" ;;
+		charged|unknown|full|fully-charged|"not charging"|not_charging) echo "=" ;;
 		*)                   echo "$1" ;;
 	esac
 }
@@ -301,11 +301,20 @@ assert_eq "batt color 66%  → yellow" "$(_batt_color 66)"  "yellow"
 assert_eq "batt color 67%  → green"  "$(_batt_color 67)"  "green"
 assert_eq "batt color 100% → green"  "$(_batt_color 100)" "green"
 
-assert_eq "batt sign charging"    "$(_batt_sign charging)"    "+"
-assert_eq "batt sign discharging" "$(_batt_sign discharging)" "-"
-assert_eq "batt sign charged"     "$(_batt_sign charged)"     "="
-assert_eq "batt sign unknown"     "$(_batt_sign unknown)"     "="
-assert_eq "batt sign full"        "$(_batt_sign full)"        "="
+assert_eq "batt sign charging"      "$(_batt_sign charging)"        "+"
+assert_eq "batt sign discharging"   "$(_batt_sign discharging)"     "-"
+assert_eq "batt sign charged"       "$(_batt_sign charged)"         "="
+assert_eq "batt sign unknown"       "$(_batt_sign unknown)"         "="
+assert_eq "batt sign full"          "$(_batt_sign full)"            "="
+assert_eq "batt sign fully-charged" "$(_batt_sign fully-charged)"   "="
+# GH #143: Linux's power_supply status can legitimately be "Not charging"
+# (plugged in, not actively drawing charge -- threshold or already full),
+# lowercased by the real script before reaching this logic; Termux reports
+# the same state as "NOT_CHARGING". Both used to fall through to the
+# catch-all and print the raw state glued to the percentage, e.g.
+# "65%not charging".
+assert_eq "batt sign \"not charging\" (Linux, space)" "$(_batt_sign "not charging")" "="
+assert_eq "batt sign not_charging (Termux, underscore)" "$(_batt_sign not_charging)" "="
 
 # ---------------------------------------------------------------------------
 # Section 13 — Disk unit extraction (from usr/lib/byobu/disk)
@@ -727,6 +736,113 @@ touch "$_tmp/.bashrc" "$_tmp/.zshrc"
 assert_true "launcher-install: .bashrc contains byobu-launch line" \
 	"grep -q 'byobu-launch' '$_tmp/.bashrc'"
 rm -rf "$_tmp"; unset _tmp _install _uninstall
+
+# ---------------------------------------------------------------------------
+# Section 35 — BYOBU_GETTEXT: overridable gettext binary (constants)
+# ---------------------------------------------------------------------------
+
+_tmp=$(mktemp -d)
+_got=$(env -i HOME="$HOME" PATH="$PATH" BYOBU_PREFIX="$BYOBU_PREFIX" PKG="byobu" \
+	BYOBU_CONFIG_DIR="$_tmp/config" BYOBU_RUN_DIR="$_tmp/run" BYOBU_TEST="command -v" \
+	sh -c 'mkdir -p "$BYOBU_CONFIG_DIR" "$BYOBU_RUN_DIR"; . "${BYOBU_PREFIX}/lib/byobu/include/constants"; echo "$BYOBU_GETTEXT"')
+assert_eq "BYOBU_GETTEXT: defaults to \"gettext\" when unset" "$_got" "gettext"
+
+_got=$(env -i HOME="$HOME" PATH="$PATH" BYOBU_PREFIX="$BYOBU_PREFIX" PKG="byobu" \
+	BYOBU_CONFIG_DIR="$_tmp/config" BYOBU_RUN_DIR="$_tmp/run" BYOBU_TEST="command -v" \
+	BYOBU_GETTEXT="/opt/store/bin/gettext" \
+	sh -c '. "${BYOBU_PREFIX}/lib/byobu/include/constants"; echo "$BYOBU_GETTEXT"')
+assert_eq "BYOBU_GETTEXT: a pre-set value is preserved untouched" "$_got" "/opt/store/bin/gettext"
+rm -rf "$_tmp"; unset _tmp _got
+
+# ---------------------------------------------------------------------------
+# Section 36 — BYOBU_FORCE_BACKEND precedence (mirrors usr/bin/byobu.in)
+# ---------------------------------------------------------------------------
+# byobu.in itself launches a full session and isn't safe to source in a unit
+# test, so this exercises the exact backend-selection block copied verbatim
+# from that script -- config file, then argv[0], then BYOBU_FORCE_BACKEND.
+
+_dispatch() {
+	local zero="$1" cfg_backend="$2" force="$3" _out
+	_out=$(BYOBU_BACKEND="" ; [ -n "$cfg_backend" ] && BYOBU_BACKEND="$cfg_backend"
+		case "$zero" in
+			*byobu-screen) BYOBU_BACKEND="screen" ;;
+			*byobu-tmux) BYOBU_BACKEND="tmux" ;;
+		esac
+		case "$force" in
+			screen|tmux) BYOBU_BACKEND="$force" ;;
+		esac
+		echo "$BYOBU_BACKEND")
+	_RET="$_out"
+}
+
+_dispatch "/usr/bin/byobu" "" ""
+assert_eq "backend dispatch: no config, no argv0 match, no override" "$_RET" ""
+
+_dispatch "/usr/bin/byobu" "screen" ""
+assert_eq "backend dispatch: config alone wins" "$_RET" "screen"
+
+_dispatch "/usr/bin/byobu-tmux" "screen" ""
+assert_eq "backend dispatch: argv0 overrides config" "$_RET" "tmux"
+
+_dispatch "/usr/bin/byobu" "screen" "tmux"
+assert_eq "backend dispatch: BYOBU_FORCE_BACKEND overrides config" "$_RET" "tmux"
+
+_dispatch "/usr/bin/byobu-tmux" "" "screen"
+assert_eq "backend dispatch: BYOBU_FORCE_BACKEND overrides argv0" "$_RET" "screen"
+
+_dispatch "/usr/bin/byobu" "screen" "garbage"
+assert_eq "backend dispatch: invalid BYOBU_FORCE_BACKEND value is ignored" "$_RET" "screen"
+
+unset -f _dispatch
+
+# ---------------------------------------------------------------------------
+# Section 37 — width-detection lock (mirrors byobu-status.in's mkdir lock)
+# ---------------------------------------------------------------------------
+# GH #141: status-left and status-right are two independent, genuinely
+# concurrent processes; this checks the mutual-exclusion primitive itself
+# (mkdir is atomic), not the live tmux calls it guards.
+
+_tmp=$(mktemp -d)
+_lockdir="$_tmp/.width.lock"
+
+mkdir "$_lockdir" 2>/dev/null && _got="ok" || _got="fail"
+assert_eq "width lock: first mkdir succeeds"              "$_got" "ok"
+
+mkdir "$_lockdir" 2>/dev/null && _got="ok" || _got="fail"
+assert_eq "width lock: concurrent mkdir fails while held" "$_got" "fail"
+
+rmdir "$_lockdir" 2>/dev/null
+mkdir "$_lockdir" 2>/dev/null && _got="ok" || _got="fail"
+assert_eq "width lock: mkdir succeeds again after release" "$_got" "ok"
+
+rmdir "$_lockdir" 2>/dev/null
+rm -rf "$_tmp"; unset _tmp _lockdir _got
+
+# ---------------------------------------------------------------------------
+# Section 38 — PID-suffixed cache writes (mirrors get_status() in byobu-status)
+# ---------------------------------------------------------------------------
+# GH #141: get_status() used to write every segment's fresh output to a
+# single shared "$cachepath".new path. status-left and status-right run as
+# separate concurrent processes, so two overlapping writes to that shared
+# path could interleave and corrupt or blank a cache entry for a tick. A
+# PID-suffixed temp path makes concurrent writers independent by
+# construction; this checks that property directly.
+
+_tmp=$(mktemp -d)
+_cachepath="$_tmp/segment"
+
+# Simulate two "processes" (distinct fake PIDs) writing concurrently.
+printf "%s" "value-from-pid-1111" > "$_cachepath.new.1111"
+printf "%s" "value-from-pid-2222" > "$_cachepath.new.2222"
+
+assert_true "cache write: PID-suffixed temp files coexist independently" \
+	"[ -f '$_cachepath.new.1111' ] && [ -f '$_cachepath.new.2222' ]"
+assert_eq "cache write: first writer's content untouched by the second" \
+	"$(cat "$_cachepath.new.1111")" "value-from-pid-1111"
+assert_eq "cache write: second writer's content untouched by the first" \
+	"$(cat "$_cachepath.new.2222")" "value-from-pid-2222"
+
+rm -rf "$_tmp"; unset _tmp _cachepath
 
 # ---------------------------------------------------------------------------
 # Results
