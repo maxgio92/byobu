@@ -845,6 +845,189 @@ assert_eq "cache write: second writer's content untouched by the first" \
 rm -rf "$_tmp"; unset _tmp _cachepath
 
 # ---------------------------------------------------------------------------
+# Section 39 — OSC 133 shell integration (profiles/shell-integration.bash)
+# ---------------------------------------------------------------------------
+# Regression coverage for a real bug caught during development: the B marker
+# embedded in PS1 used ST (ESC \) as its terminator, whose second byte is a
+# literal backslash -- which collided with bash's own \[ \] PS1 escaping and
+# left a stray "]" character in the rendered prompt. Switched to BEL. ${PS1@P}
+# (bash 4.4+) applies real PS1 prompt-expansion without needing a live
+# interactive session/pty, so this exercises the same code path bash itself
+# uses to render a prompt, not just a string check.
+
+# Not a subshell: assert_eq/assert_true update the global PASS/FAIL counters,
+# which wouldn't propagate back out of one. Safe to leave PS1/PROMPT_COMMAND/
+# PS0 set afterward -- this is the last section before Results.
+
+PS1="myprompt\$ "
+unset PROMPT_COMMAND PS0
+. "${BYOBU_PREFIX}/share/byobu/profiles/shell-integration.bash"
+
+rendered="${PS1@P}"
+expected=$(printf 'myprompt$ \033]133;B\a')
+assert_eq "osc133 bash: PS1 renders to exactly prompt + B marker, no stray bytes" \
+	"$rendered" "$expected"
+
+# PROMPT_COMMAND: exit code must be the real preceding command's, not
+# something clobbered by the hook's own internals.
+false
+out=$(eval "$PROMPT_COMMAND")
+want=$(printf '\033]133;D;1\a\033]133;A\a')
+assert_eq "osc133 bash: PROMPT_COMMAND emits D;<real exit code> then A" "$out" "$want"
+
+true
+out=$(eval "$PROMPT_COMMAND")
+want=$(printf '\033]133;D;0\a\033]133;A\a')
+assert_eq "osc133 bash: exit code 0 captured correctly too" "$out" "$want"
+
+# PS0 holds a deferred command substitution, not a literal unexpanded
+# ${...} (the exact class of bug this would have caught: using \${x}
+# instead of \$(x) silently never fires). ${PS0@P} applies real
+# prompt-expansion, same as ${PS1@P} above -- eval would try to execute
+# the marker's raw escape bytes as a command instead of embedding them.
+out="${PS0@P}"
+want=$(printf '\033]133;C\a')
+assert_eq "osc133 bash: PS0 command substitution fires the C marker" "$out" "$want"
+
+# Idempotency: sourcing twice must not duplicate the hook or grow PS1.
+prompt_command_before="$PROMPT_COMMAND"
+ps1_before="$PS1"
+. "${BYOBU_PREFIX}/share/byobu/profiles/shell-integration.bash"
+assert_eq "osc133 bash: re-sourcing does not duplicate PROMPT_COMMAND" \
+	"$PROMPT_COMMAND" "$prompt_command_before"
+assert_eq "osc133 bash: re-sourcing does not duplicate the PS1 marker" \
+	"$PS1" "$ps1_before"
+
+# Chains onto an existing PROMPT_COMMAND/PS1 instead of replacing them.
+PS1="custom\$ "
+PROMPT_COMMAND="echo already-here"
+unset PS0
+. "${BYOBU_PREFIX}/share/byobu/profiles/shell-integration.bash"
+assert_true "osc133 bash: chains onto an existing PROMPT_COMMAND rather than replacing it" \
+	"[[ \"\$PROMPT_COMMAND\" == *already-here* ]]"
+assert_true "osc133 bash: chains onto an existing PS1 rather than replacing it" \
+	"[[ \"\${PS1@P}\" == custom* ]]"
+
+unset PS1 PROMPT_COMMAND PS0 rendered expected out want prompt_command_before ps1_before
+
+# ---------------------------------------------------------------------------
+# Section 40 — OSC 133 shell integration (profiles/shell-integration.zsh)
+# ---------------------------------------------------------------------------
+# zsh counterpart to Section 39. Skipped, not failed, when zsh isn't
+# installed -- it's an optional dependency of this test suite, not of
+# byobu itself, and not every box this runs on will have it. A skip prints
+# a visible notice so it's never mistaken for having actually run.
+
+if command -v zsh >/dev/null 2>&1; then
+	_zsh_script="$BYOBU_PREFIX/share/byobu/profiles/shell-integration.zsh"
+	_zsh_out=$(zsh -c '
+		precmd_functions=()
+		preexec_functions=()
+		PROMPT="myprompt\$ "
+		source "'"$_zsh_script"'"
+
+		rendered="${(%)PROMPT}"
+		expected=$(printf "myprompt\$ \033]133;B\a")
+		[ "$rendered" = "$expected" ] && echo "PS1_OK" || echo "PS1_FAIL:[$rendered]"
+
+		out=$(__byobu_osc133_precmd)
+		want=$(printf "\033]133;D;0\a\033]133;A\a")
+		[ "$out" = "$want" ] && echo "PRECMD_OK" || echo "PRECMD_FAIL:[$out]"
+
+		out=$(__byobu_osc133_preexec)
+		want=$(printf "\033]133;C\a")
+		[ "$out" = "$want" ] && echo "PREEXEC_OK" || echo "PREEXEC_FAIL:[$out]"
+
+		before_precmd=${#precmd_functions[@]}
+		before_prompt="$PROMPT"
+		source "'"$_zsh_script"'"
+		[ "${#precmd_functions[@]}" = "$before_precmd" ] && echo "IDEMPOTENT_PRECMD_OK" || echo "IDEMPOTENT_PRECMD_FAIL"
+		[ "$PROMPT" = "$before_prompt" ] && echo "IDEMPOTENT_PROMPT_OK" || echo "IDEMPOTENT_PROMPT_FAIL"
+	' 2>&1)
+
+	assert_true "osc133 zsh: PROMPT renders to exactly prompt + B marker" \
+		"printf %s \"\$_zsh_out\" | grep -q PS1_OK"
+	assert_true "osc133 zsh: precmd emits D;<exit code> then A" \
+		"printf %s \"\$_zsh_out\" | grep -q PRECMD_OK"
+	assert_true "osc133 zsh: preexec emits the C marker" \
+		"printf %s \"\$_zsh_out\" | grep -q PREEXEC_OK"
+	assert_true "osc133 zsh: re-sourcing does not duplicate the precmd hook" \
+		"printf %s \"\$_zsh_out\" | grep -q IDEMPOTENT_PRECMD_OK"
+	assert_true "osc133 zsh: re-sourcing does not duplicate the PROMPT marker" \
+		"printf %s \"\$_zsh_out\" | grep -q IDEMPOTENT_PROMPT_OK"
+
+	unset _zsh_script _zsh_out
+else
+	echo "  SKIP: zsh not installed -- shell-integration.zsh not exercised"
+fi
+
+# ---------------------------------------------------------------------------
+# Section 41 — byobu-enable/disable-shell-integration (rc-file injection)
+# ---------------------------------------------------------------------------
+# The enable/disable scripts are .in templates (need @prefix@ substituted),
+# so this exercises them the same way test_byobu.sh already handles
+# launcher-install/-uninstall above: read the .in source directly and sed
+# out the one substitution that matters for a functional test.
+
+# Both scripts source include/common, which needs include/dirs -- itself a
+# .in template not present without a full autoreconf/configure/make cycle
+# (confirmed while writing this test: running the .in directly, even with
+# @prefix@ substituted, fails on that missing dependency). Section 34 above
+# hits the exact same problem with launcher-install/-uninstall and solves it
+# the same way this does: static checks on the .in source, plus an inline
+# simulation of the marker-line logic rather than actually invoking the
+# script. The real end-to-end behavior (this exact scenario, plus a full
+# build) was verified manually in Docker during development.
+
+_enable_src="$BYOBU_PREFIX/bin/byobu-enable-shell-integration.in"
+_disable_src="$BYOBU_PREFIX/bin/byobu-disable-shell-integration.in"
+_marker="#byobu-shell-integration#"
+
+if [ -r "$_enable_src" ] && [ -r "$_disable_src" ]; then
+	assert_true "enable-shell-integration: handles bash" \
+		"grep -q '\*bash)' '$_enable_src'"
+	assert_true "enable-shell-integration: handles zsh" \
+		"grep -q '\*zsh)' '$_enable_src'"
+	assert_true "enable-shell-integration: calls disable first (idempotency)" \
+		"grep -q 'disable-shell-integration --no-reload' '$_enable_src'"
+	assert_true "enable-shell-integration and disable-shell-integration: same marker string" \
+		"grep -q \"$_marker\" '$_enable_src' && grep -q \"$_marker\" '$_disable_src'"
+
+	# Inline simulation of the marker-line logic both scripts actually use
+	# (append-if-absent in enable, "sed -e /marker$/d" in disable) against a
+	# fake rc file -- this is the part with real dedup/removal bugs to catch.
+	_tmp=$(mktemp -d)
+	_rc="$_tmp/.bashrc"
+	echo "existing line" > "$_rc"
+
+	_inject() {
+		sed -e "/${_marker}$/d" "$_rc" > "$_rc.new" && mv "$_rc.new" "$_rc"
+		printf '[ -r "profile" ] && . "profile"   %s\n' "$_marker" >> "$_rc"
+	}
+
+	_inject
+	assert_true "rc injection: adds exactly one marker line" \
+		"[ \"\$(grep -c \"$_marker\" '$_rc')\" = 1 ]"
+	assert_true "rc injection: preserves the pre-existing line" \
+		"grep -q '^existing line$' '$_rc'"
+
+	_inject
+	assert_true "rc injection: idempotent, still exactly one marker line after a second run" \
+		"[ \"\$(grep -c \"$_marker\" '$_rc')\" = 1 ]"
+
+	sed -e "/${_marker}$/d" "$_rc" > "$_rc.new" && mv "$_rc.new" "$_rc"
+	assert_true "rc removal: cleans up back to byte-identical original content" \
+		"[ \"\$(cat '$_rc')\" = 'existing line' ]"
+
+	unset -f _inject
+	rm -rf "$_tmp"; unset _tmp _rc
+else
+	echo "  SKIP: byobu-enable/disable-shell-integration.in not found -- rc-injection not exercised"
+fi
+
+unset _enable_src _disable_src _marker
+
+# ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 

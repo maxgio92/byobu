@@ -201,6 +201,7 @@ const btnPrev          = document.getElementById('btn-prev');
 const btnNext          = document.getElementById('btn-next');
 const btnEscape        = document.getElementById('btn-escape');
 const escapePopup      = document.getElementById('escape-popup');
+const kbdModePopup     = document.getElementById('kbdmode-popup');
 
 // offline overlay elements
 const offlineOverlay       = document.getElementById('offline-overlay');
@@ -423,16 +424,10 @@ function paneDisplayName(p) {
 
 // ── position label ────────────────────────────────────────────────────────
 function activePaneXYZ() {
-  const s = currentSession();
-  const w = currentWindow();
-  if (!s || !w || !currentPane) return '-/-';
-  const windows = (s.windows || []).filter(win => firstLivePaneInWindow(win));
-  const wIdx = windows.findIndex(win => win.id === currentWindowId);
-  const panes = livePanesInWindow(w);
-  const pIdx = panes.findIndex(p => p.id === currentPane);
-  const wText = wIdx < 0 ? 'W-/-' : `W${wIdx + 1}/${windows.length}`;
-  const pText = pIdx < 0 ? 'P-/-' : `P${pIdx + 1}/${panes.length}`;
-  return `${wText} ${pText}`;
+  const list = flatPaneList();
+  if (!currentPane || list.length === 0) return '-/-';
+  const idx = list.findIndex(e => e.paneId === currentPane);
+  return idx < 0 ? '-/-' : `${idx + 1}/${list.length}`;
 }
 
 function updateXYZLabel() {
@@ -742,7 +737,7 @@ function sendKeys() {
 }
 
 // ── events ─────────────────────────────────────────────────────────────────
-xyzLabel.addEventListener('click', () => navigateRelativePane(1));
+xyzLabel.addEventListener('click', () => send({ type: 'list_sessions' }));
 cmdInput.addEventListener('keydown', e => {
   // The Enter that commits an IME composition arrives here with
   // isComposing=true (or as Android keyCode 229); it must not reach the pane.
@@ -778,11 +773,21 @@ pwdInput.addEventListener('keydown', e => {
 });
 btnSend.addEventListener('click', sendKeys);
 
-// ── keyboard mode toggle ($_ / Aa / **) ───────────────────────────────────
+// ── keyboard mode popup ($_ / Aa / **) ─────────────────────────────────────
 // 0 = terminal ($_)   no spell-check, no autocorrect
 // 1 = text     (Aa)   spell-check + autocorrect on
 // 2 = password (**)   type="password" input — keyboard does not learn text
+// Tapping the button opens a 3-way popup (like the ⎋ button) rather than
+// cycling on tap: with three real choices a popup is faster to land on the
+// one you want and shows what the other two are, instead of tap-tap-tap
+// past states you don't want to confirm each is the right one.
 let kbdMode = 0;
+const kbdModePopupButtons = {
+  0: document.getElementById('kbdmode-popup-terminal'),
+  1: document.getElementById('kbdmode-popup-text'),
+  2: document.getElementById('kbdmode-popup-password'),
+};
+
 function applyKbdMode() {
   const inPwd = kbdMode === 2;
   cmdInput.style.display = inPwd ? 'none' : '';
@@ -803,7 +808,7 @@ function applyKbdMode() {
     cmdInput.setAttribute('autocorrect', direct ? 'off' : 'on');
     cmdInput.setAttribute('autocapitalize', direct ? 'none' : 'sentences');
     btnKbdMode.textContent = 'Aa';
-    btnKbdMode.title = 'Text mode — tap for terminal mode';
+    btnKbdMode.title = 'Text mode — tap to change';
     btnKbdMode.style.color = 'var(--accent)';
     // Don't advertise spell check while direct mode has it forced off.
     if (direct) {
@@ -815,12 +820,15 @@ function applyKbdMode() {
     cmdInput.setAttribute('autocorrect', 'off');
     cmdInput.setAttribute('autocapitalize', 'none');
     btnKbdMode.textContent = '$_';
-    btnKbdMode.title = 'Terminal mode — tap to enable spell check';
+    btnKbdMode.title = 'Terminal mode — tap to change';
     btnKbdMode.style.color = '';
   } else {
     btnKbdMode.textContent = '**';
-    btnKbdMode.title = 'Password mode — keyboard will not learn this text';
+    btnKbdMode.title = 'Password mode — tap to change';
     btnKbdMode.style.color = 'var(--accent)';
+  }
+  for (const [mode, btn] of Object.entries(kbdModePopupButtons)) {
+    btn.classList.toggle('current', Number(mode) === kbdMode);
   }
   // Non-password direct mode hides the row's button column, so the bar
   // carries a mirror of the mode button; keep the two in sync here.
@@ -834,23 +842,60 @@ function applyKbdMode() {
   _ghostSync();
   scrollOutputToBottom();
 }
-btnKbdMode.addEventListener('click', () => {
-  kbdMode = (kbdMode + 1) % 3;
+
+function setKbdMode(mode) {
+  kbdMode = mode;
   if (currentPane) _saveKbdMode(currentPane, kbdMode);
+  // Aa defaults to wrapped text, Terminal/Password to unwrapped -- applied
+  // once here, on the mode switch itself, not forced on every render. A
+  // manual Wrap toggle afterward (escape popup) still sticks until the
+  // keyboard mode is changed again.
+  wrapOn = (kbdMode === 1);
+  if (currentPane) {
+    _saveWrap(currentPane, wrapOn);
+    send({ type: 'subscribe', pane_id: currentPane, lines: 300, ansi: true, join: wrapOn });
+  }
+  applyWrap();
   applyKbdMode();
   // blur + refocus so Android keyboard re-evaluates input type/spellcheck
   const inp = activeInput();
   inp.blur();
   setTimeout(() => inp.focus(), 50);
+}
+
+function showKbdModePopup(anchor = btnKbdMode) {
+  hideEscapePopup();
+  const rect = anchor.getBoundingClientRect();
+  kbdModePopup.style.display = 'flex';
+  kbdModePopup.style.right   = (window.innerWidth - rect.right) + 'px';
+  kbdModePopup.style.bottom  = (window.innerHeight - rect.top + 8) + 'px';
+}
+
+function hideKbdModePopup() {
+  kbdModePopup.style.display = 'none';
+}
+
+btnKbdMode.addEventListener('click', e => {
+  e.stopPropagation();
+  kbdModePopup.style.display === 'none' ? showKbdModePopup() : hideKbdModePopup();
 });
-// Same cycle from the key bar (the row's button is display:none while the
-// row is collapsed). pointerdown preventDefault keeps focus in the text box
-// like the other bar buttons; the shared handler refocuses anyway.
-keybarKbdMode.addEventListener('click', () => btnKbdMode.click());
+// Same popup from the key bar, anchored to the bar's own button: the row's
+// button is display:none while the row is collapsed, so its rect is unusable
+// as an anchor there. pointerdown preventDefault keeps focus in the text box
+// like the other bar buttons.
+keybarKbdMode.addEventListener('click', e => {
+  e.stopPropagation();
+  kbdModePopup.style.display === 'none' ? showKbdModePopup(keybarKbdMode) : hideKbdModePopup();
+});
 keybarKbdMode.addEventListener('pointerdown', e => e.preventDefault());
+
+kbdModePopupButtons[0].addEventListener('click', () => { setKbdMode(0); hideKbdModePopup(); });
+kbdModePopupButtons[1].addEventListener('click', () => { setKbdMode(1); hideKbdModePopup(); });
+kbdModePopupButtons[2].addEventListener('click', () => { setKbdMode(2); hideKbdModePopup(); });
 
 // ── escape / ctrl-c popup ─────────────────────────────────────────────────
 function showEscapePopup() {
+  hideKbdModePopup();
   const rect = btnEscape.getBoundingClientRect();
   escapePopup.style.display = 'flex';
   escapePopup.style.right   = (window.innerWidth - rect.right) + 'px';
@@ -884,7 +929,11 @@ document.getElementById('escape-popup-keys').addEventListener('click', () => {
 // ── line wrap toggle ───────────────────────────────────────────────────────
 // Off (default): tmux's own line breaks, pre with horizontal scroll. On: the
 // daemon captures with -J so soft-wrapped lines come back joined, and
-// pre-wrap reflows them at the phone width. Decoupled from kbdMode.
+// pre-wrap reflows them at the phone width. Its own independent, per-pane-
+// persisted state -- not driven by kbdMode -- but choosing a keyboard mode
+// sets a sensible default on the switch (Aa on, Terminal/Password off) so
+// picking Aa wraps immediately without a separate manual step; a Wrap
+// toggle after that still sticks until the keyboard mode is changed again.
 let wrapOn = false;
 const escapePopupWrap = document.getElementById('escape-popup-wrap');
 const keybarWrap = document.getElementById('keybar-wrap');
@@ -916,9 +965,11 @@ escapePopupWrap.addEventListener('click', () => {
 keybarWrap.addEventListener('click', () => escapePopupWrap.click());
 keybarWrap.addEventListener('pointerdown', e => e.preventDefault());
 
-document.addEventListener('click', () => hideEscapePopup());
+document.addEventListener('click', () => { hideEscapePopup(); hideKbdModePopup(); });
 document.addEventListener('touchstart', e => {
   if (!escapePopup.contains(e.target) && e.target !== btnEscape) hideEscapePopup();
+  if (!kbdModePopup.contains(e.target) && e.target !== btnKbdMode
+      && e.target !== keybarKbdMode) hideKbdModePopup();
 }, { passive: true });
 
 // ── key bar (Esc, Ctrl, Tab, arrows; direct key mode for TUIs like vi) ─────
@@ -2036,6 +2087,9 @@ function applyTheme() {
 function rerenderTerminal() {
   _paneCache.clear();
   if (currentPane) {
+    // join must ride every resubscribe: without it the daemon captures this
+    // pane unjoined, and with wrap on the re-render hard-breaks long lines
+    // at the tmux pane width until the next pane switch.
     send({ type: 'subscribe', pane_id: currentPane, lines: 300, ansi: true, join: wrapOn });
   }
 }
