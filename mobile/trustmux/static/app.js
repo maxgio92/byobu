@@ -1504,12 +1504,18 @@ function _ghostSync() {
   } else {
     // Climb out of styled ANSI spans: text-decoration propagates into
     // children and cannot be reset from a descendant, so an SGR-underlined
-    // last line would merge its underline into the ghost's dotted one.
-    // (The trailing-newline branch above keeps in-place insertion; moving
-    // the ghost outside that span would land it after the newlines.)
+    // ancestor would merge its underline into the ghost's dotted one.
+    // Stop at the line span's child, not the line span itself: inserting
+    // inside the line, before its trailing "\n" text node, keeps a
+    // mid-buffer anchor (a styled prompt with blank rows below it, the
+    // wrap-mode norm) on the prompt's line; inserting after the whole line
+    // span would land past that newline and start the next line.
     let anchor = last;
-    while (anchor.parentNode !== output) anchor = anchor.parentNode;
-    output.insertBefore(span, anchor.nextSibling);
+    while (anchor.parentNode !== output
+           && anchor.parentNode.parentNode !== output) {
+      anchor = anchor.parentNode;
+    }
+    anchor.parentNode.insertBefore(span, anchor.nextSibling);
   }
 }
 
