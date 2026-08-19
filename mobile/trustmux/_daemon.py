@@ -877,6 +877,12 @@ _WS_RATE_LIMIT  = 20    # max messages per window
 # missing or mid-respawn, so control mode is an accelerator, not a
 # dependency. Command replies over control mode are byte-identical to the
 # subprocess output, including raw ANSI from capture-pane -e (tmux 3.7).
+#
+# Control-mode commands are LINES that tmux itself parses, so values
+# interpolated into them must be injection-proof: the cm_* helpers accept
+# only _valid_tmux_id ids (falling back to the argv subprocess path
+# otherwise) and clamped ints. Anything user-typed (send-keys text) stays
+# on the argv path by design.
 # ---------------------------------------------------------------------------
 
 _CM_ATTACH_TIMEOUT = 3.0   # seconds to wait for the attach greeting block
@@ -1073,7 +1079,7 @@ async def cm_capture_pane(session_id: str | None, pane_id: str,
                           history_lines: int = 200, ansi: bool = False,
                           join: bool = False) -> str:
     """tmux_capture_pane over the control client, subprocess fallback."""
-    if session_id:
+    if session_id and _valid_tmux_id(pane_id):
         cmd = f"capture-pane -t {pane_id} -p"
         if ansi:
             cmd += " -e"
@@ -1089,7 +1095,7 @@ async def cm_capture_pane(session_id: str | None, pane_id: str,
 
 async def cm_cursor(session_id: str | None, pane_id: str) -> dict | None:
     """tmux_cursor over the control client, subprocess fallback."""
-    if session_id:
+    if session_id and _valid_tmux_id(pane_id):
         raw = await _MONITOR.run(
             session_id, f'display-message -p -t {pane_id} "{_CURSOR_FMT}"')
         if raw is not None:
@@ -1101,7 +1107,7 @@ async def cm_join_cursor(session_id: str | None, pane_id: str,
                          content: str) -> dict | None:
     """Cursor for a joined (-J) capture, mapped by _join_cursor."""
     raw = None
-    if session_id:
+    if session_id and _valid_tmux_id(pane_id):
         raw = await _MONITOR.run(
             session_id, f'display-message -p -t {pane_id} "{_CURSOR_FMT}"')
     if raw is None:
