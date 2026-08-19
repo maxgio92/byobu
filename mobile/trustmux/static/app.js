@@ -1541,9 +1541,12 @@ btnPrev.addEventListener('click', () => navigateRelative(-1));
 btnNext.addEventListener('click', () => navigateRelative(1));
 document.getElementById('btn-create').addEventListener('click', showCreateOverlay);
 
-// ── context jump list (tap context name in header) ─────────────────────────
+// ── context jump list (left drawer; tap context name in header) ────────────
 // Drill-down picker: one list per level (sessions, windows, panes) instead of
 // one flat indented tree, which turned into a giant scroll with many contexts.
+// Presented as a drawer sliding in from the left edge (see the drawer CSS in
+// index.html); a pane selection navigates and closes it, and the scrim keeps
+// the tap-outside dismissal.
 // _ctxLevel/_ctxSessionId/_ctxWindowId hold where the picker is;
 // showCtxOverlayAt resets them to the requested level on every open.
 let _ctxLevel     = 'windows'; // 'sessions' | 'windows' | 'panes'
@@ -1682,6 +1685,11 @@ function showCtxOverlayAt(level) {
   ctxListView.style.display = '';
   ctxRenameForm.style.display = 'none';
   ctxOverlay.style.display = 'flex';
+  // Drawer slide-in: the transform transition needs a rendered start frame
+  // with the box off-screen, so force a layout before adding the class.
+  // Reduced-motion users get no transition (see the drawer CSS).
+  ctxOverlay.offsetHeight;
+  ctxOverlay.classList.add('open');
 }
 
 function showCtxOverlay() {
@@ -1690,6 +1698,9 @@ function showCtxOverlay() {
   showCtxOverlayAt('windows');
 }
 function hideCtxOverlay() {
+  // No exit animation: hiding immediately keeps ctxPickerActive() (a plain
+  // display check) truthful and avoids transitionend bookkeeping.
+  ctxOverlay.classList.remove('open');
   ctxOverlay.style.display = 'none';
 }
 ctxName.addEventListener('click', e => {
