@@ -1478,9 +1478,17 @@ function _ghostSync() {
   // serialization-neutral: adjacent text nodes read back as the same
   // innerHTML, so once the ghost is removed (navigateTo strips it before
   // every cache save) nothing of this leaks into _paneCache.
+  // Last text node with a non-newline character: every rendered line is its
+  // own span, so the trailing blank screen rows are bare "\n" nodes and the
+  // plain last-node walk would park the ghost on the bottom blank row
+  // instead of after the prompt (visible in wrap mode, where this fallback
+  // is the only anchor). A join capture preserves the prompt's trailing
+  // space, so landing after it puts the ghost exactly at the caret cell.
   let last = null;
   const walker = document.createTreeWalker(output, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) last = walker.currentNode;
+  while (walker.nextNode()) {
+    if (/[^\n]/.test(walker.currentNode.textContent)) last = walker.currentNode;
+  }
   if (!last) {
     _ghostFill(span, '', text);
     output.appendChild(span);
