@@ -94,7 +94,7 @@ def _set_instance(inst: Instance) -> None:
 
 _INSTALLED_STATIC = Path("/usr/share/trustmux/static")
 _DEV_STATIC       = Path(__file__).parent / "static"
-STATIC            = _INSTALLED_STATIC if _INSTALLED_STATIC.is_dir() else _DEV_STATIC
+STATIC            = _DEV_STATIC if _DEV_STATIC.is_dir() else _INSTALLED_STATIC
 
 def _get_server_tz() -> str:
     try:
