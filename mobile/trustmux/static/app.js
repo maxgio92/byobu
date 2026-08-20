@@ -1800,6 +1800,7 @@ function showCtxOverlayAt(level) {
   renderCtxList();
   ctxListView.style.display = '';
   ctxRenameForm.style.display = 'none';
+  ctxOverlay.classList.remove('drawer-closing');  // reopen mid-close
   ctxOverlay.style.display = 'flex';
 }
 
@@ -1809,15 +1810,65 @@ function showCtxOverlay() {
   showCtxOverlayAt('windows');
 }
 function hideCtxOverlay() {
-  ctxOverlay.style.display = 'none';
+  // Play the drawer's slide-out before hiding. The timeout backstops a lost
+  // animationend (mid-render tab switch) so the closing state cannot stick.
+  if (ctxOverlay.style.display === 'none'
+      || ctxOverlay.classList.contains('drawer-closing')) return;
+  const done = () => {
+    ctxOverlay.classList.remove('drawer-closing');
+    ctxOverlay.style.display = 'none';
+  };
+  ctxOverlay.classList.add('drawer-closing');
+  ctxOverlay.addEventListener('animationend', done, { once: true });
+  setTimeout(done, 220);
 }
 ctxName.addEventListener('click', e => {
   // Segment clicks open their own level; only a miss keeps the default.
   if (e.target.closest('.ctx-seg')) return;
   showCtxOverlay();
 });
+document.getElementById('btn-drawer').addEventListener('click', () => showCtxOverlay());
 ctxCancel.addEventListener('click', hideCtxOverlay);
 ctxOverlay.addEventListener('click', e => { if (e.target === ctxOverlay) hideCtxOverlay(); });
+
+// ── drawer gestures ─────────────────────────────────────────────────────────
+// Classic drawer feel: a rightward swipe that starts on the left screen edge
+// opens it, a leftward swipe anywhere on the open drawer closes it. The
+// 24px edge zone stays clear of the terminal's own touch use (scrolling,
+// selection), which lives past it, and the open gesture yields to any other
+// full-screen overlay.
+let _edgeTouch = null;
+document.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  const blocked = ctxOverlay.style.display !== 'none'
+    || createOverlay.style.display !== 'none'
+    || document.getElementById('settings-overlay').style.display !== 'none'
+    || document.getElementById('lock-overlay').style.display !== 'none';
+  _edgeTouch = (e.touches.length === 1 && t.clientX <= 24 && !blocked)
+    ? { x: t.clientX, y: t.clientY } : null;
+}, { passive: true });
+document.addEventListener('touchmove', e => {
+  if (!_edgeTouch) return;
+  const dx = e.touches[0].clientX - _edgeTouch.x;
+  const dy = e.touches[0].clientY - _edgeTouch.y;
+  if (Math.abs(dy) > 40) { _edgeTouch = null; return; }
+  if (dx > 40) { _edgeTouch = null; showCtxOverlay(); }
+}, { passive: true });
+document.addEventListener('touchend', () => { _edgeTouch = null; }, { passive: true });
+
+let _drawerTouch = null;
+ctxOverlay.addEventListener('touchstart', e => {
+  // Not while the rename form is up: a stray swipe would eat typed text.
+  _drawerTouch = (e.touches.length === 1 && ctxRenameForm.style.display === 'none')
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+ctxOverlay.addEventListener('touchmove', e => {
+  if (!_drawerTouch) return;
+  const dx = e.touches[0].clientX - _drawerTouch.x;
+  const dy = e.touches[0].clientY - _drawerTouch.y;
+  if (Math.abs(dy) > 40) { _drawerTouch = null; return; }
+  if (dx < -40) { _drawerTouch = null; hideCtxOverlay(); }
+}, { passive: true });
 
 // ── rename sub-form (reached via "Rename current" inside the jump list) ────
 let _pendingRenameId = null;
