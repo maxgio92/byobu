@@ -1802,6 +1802,7 @@ function showCtxOverlayAt(level) {
   ctxRenameForm.style.display = 'none';
   ctxOverlay.classList.remove('drawer-closing');  // reopen mid-close
   ctxOverlay.style.display = 'flex';
+  _drawerPushHist();
 }
 
 function showCtxOverlay() {
@@ -1809,18 +1810,48 @@ function showCtxOverlay() {
   // window's panes one tap away.
   showCtxOverlayAt('windows');
 }
-function hideCtxOverlay() {
+// The open drawer owns one history entry, so the system back gesture (the
+// left-edge swipe on Android) closes the drawer and stays in the app, the
+// native drawer contract, instead of backing out of the PWA. UI closes
+// consume the entry so the stack never grows.
+let _drawerHist = false;
+function _drawerPushHist() {
+  if (_drawerHist) return;
+  _drawerHist = true;
+  history.pushState({ tmDrawer: 1 }, '');
+}
+window.addEventListener('popstate', () => {
+  const wasOurs = _drawerHist;
+  _drawerHist = false;
+  if (wasOurs) hideCtxOverlay(true);
+});
+
+function hideCtxOverlay(fromPop) {
   // Play the drawer's slide-out before hiding. The timeout backstops a lost
   // animationend (mid-render tab switch) so the closing state cannot stick.
   if (ctxOverlay.style.display === 'none'
       || ctxOverlay.classList.contains('drawer-closing')) return;
+  if (_drawerHist && !fromPop) {
+    // Consume our entry; the flag drop makes the resulting popstate a no-op.
+    _drawerHist = false;
+    history.back();
+  }
+  // Every arm gets torn down in done(): a {once} listener that never fired
+  // (animation canceled by display:none, tab backgrounded) would otherwise
+  // survive armed and be triggered by the NEXT open's own animationend,
+  // closing a freshly opened drawer.
+  let timer = null;
   const done = () => {
+    clearTimeout(timer);
+    ctxOverlay.removeEventListener('animationend', done);
+    ctxOverlay.removeEventListener('animationcancel', done);
     ctxOverlay.classList.remove('drawer-closing');
     ctxOverlay.style.display = 'none';
   };
   ctxOverlay.classList.add('drawer-closing');
-  ctxOverlay.addEventListener('animationend', done, { once: true });
-  setTimeout(done, 220);
+  ctxOverlay.addEventListener('animationend', done);
+  ctxOverlay.addEventListener('animationcancel', done);
+  timer = setTimeout(done, 220);
 }
 ctxName.addEventListener('click', e => {
   // Segment clicks open their own level; only a miss keeps the default.
@@ -1832,30 +1863,12 @@ ctxCancel.addEventListener('click', hideCtxOverlay);
 ctxOverlay.addEventListener('click', e => { if (e.target === ctxOverlay) hideCtxOverlay(); });
 
 // ── drawer gestures ─────────────────────────────────────────────────────────
-// Classic drawer feel: a rightward swipe that starts on the left screen edge
-// opens it, a leftward swipe anywhere on the open drawer closes it. The
-// 24px edge zone stays clear of the terminal's own touch use (scrolling,
-// selection), which lives past it, and the open gesture yields to any other
-// full-screen overlay.
-let _edgeTouch = null;
-document.addEventListener('touchstart', e => {
-  const t = e.touches[0];
-  const blocked = ctxOverlay.style.display !== 'none'
-    || createOverlay.style.display !== 'none'
-    || document.getElementById('settings-overlay').style.display !== 'none'
-    || document.getElementById('lock-overlay').style.display !== 'none';
-  _edgeTouch = (e.touches.length === 1 && t.clientX <= 24 && !blocked)
-    ? { x: t.clientX, y: t.clientY } : null;
-}, { passive: true });
-document.addEventListener('touchmove', e => {
-  if (!_edgeTouch) return;
-  const dx = e.touches[0].clientX - _edgeTouch.x;
-  const dy = e.touches[0].clientY - _edgeTouch.y;
-  if (Math.abs(dy) > 40) { _edgeTouch = null; return; }
-  if (dx > 40) { _edgeTouch = null; showCtxOverlay(); }
-}, { passive: true });
-document.addEventListener('touchend', () => { _edgeTouch = null; }, { passive: true });
-
+// No swipe-in-from-the-edge opener: Android's left-edge swipe IS the system
+// back gesture, so an edge-swipe open fires together with a back navigation
+// that then closes the drawer (or leaves the PWA) the moment it opened. The
+// hamburger and the breadcrumb are the openers; a leftward swipe on the
+// open drawer closes it, and so does the system back gesture via the
+// history entry below.
 let _drawerTouch = null;
 ctxOverlay.addEventListener('touchstart', e => {
   // Not while the rename form is up: a stray swipe would eat typed text.
@@ -1869,6 +1882,10 @@ ctxOverlay.addEventListener('touchmove', e => {
   if (Math.abs(dy) > 40) { _drawerTouch = null; return; }
   if (dx < -40) { _drawerTouch = null; hideCtxOverlay(); }
 }, { passive: true });
+// The system stealing the gesture (back navigation, app switch) must not
+// leave a live start point behind.
+ctxOverlay.addEventListener('touchcancel', () => { _drawerTouch = null; },
+                            { passive: true });
 
 // ── rename sub-form (reached via "Rename current" inside the jump list) ────
 let _pendingRenameId = null;
