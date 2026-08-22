@@ -589,6 +589,45 @@ class _StreamPaneHarness(unittest.TestCase):
             return asyncio.run(main())
 
 
+class TestAutosizeWindow(unittest.TestCase):
+    """tmux_autosize_window grows only undisplayed windows still at the
+    80x24 fallback, to the largest attached client (or the built-in
+    default with no clients)."""
+
+    def _run(self, win_info, clients):
+        calls = []
+        def fake_tmux(*args):
+            calls.append(args)
+            if "display-message" in args:
+                return win_info
+            if "list-clients" in args:
+                return clients
+            return ""
+        with patch.object(bm, '_tmux', side_effect=fake_tmux):
+            bm.tmux_autosize_window('%1')
+        return [c for c in calls if 'resize-window' in c]
+
+    def test_orphan_at_fallback_grows_to_largest_client(self):
+        resizes = self._run('@3 80 24', '@0 173 48\n@0 274 60\n')
+        self.assertEqual(len(resizes), 1)
+        self.assertIn('274', resizes[0])
+        self.assertIn('60', resizes[0])
+
+    def test_orphan_with_no_clients_gets_default(self):
+        resizes = self._run('@3 80 24', '')
+        self.assertEqual(len(resizes), 1)
+        self.assertIn(str(bm._FALLBACK_SIZE[0]), resizes[0])
+
+    def test_displayed_window_is_left_alone(self):
+        self.assertEqual(self._run('@3 80 24', '@3 173 48\n'), [])
+
+    def test_deliberately_sized_window_is_left_alone(self):
+        self.assertEqual(self._run('@3 120 30', '@0 173 48\n'), [])
+
+    def test_malformed_geometry_is_a_noop(self):
+        self.assertEqual(self._run('@3 80', ''), [])
+
+
 class TestJoinCursor(unittest.TestCase):
     """_join_cursor maps a screen cursor into joined (-J) capture
     coordinates: line index from the end plus an offset into the joined

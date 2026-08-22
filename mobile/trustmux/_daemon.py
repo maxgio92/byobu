@@ -522,6 +522,45 @@ def tmux_rename_window(window_id: str, name: str) -> None:
 def tmux_rename_session(session_id: str, name: str) -> None:
     _tmux("rename-session", "-t", session_id, name)
 
+# A window no attached client displays falls back to tmux's 80x24 default,
+# which is exactly what every window created from the phone gets: TUIs then
+# render a 24-row viewport and truncate long output. Grow such orphans to
+# the largest attached client's size (or a laptop-ish default with no
+# client), and only when they still sit at the untouched 80x24 fallback, so
+# a window someone sized on purpose is never second-guessed.
+_ORPHAN_SIZE = (80, 24)
+_FALLBACK_SIZE = (190, 50)
+
+def tmux_autosize_window(pane_id: str) -> None:
+    raw = _tmux("display-message", "-p", "-t", pane_id,
+                "#{window_id} #{window_width} #{window_height}").split()
+    if len(raw) != 3:
+        return
+    win_id, w, h = raw[0], raw[1], raw[2]
+    try:
+        if (int(w), int(h)) != _ORPHAN_SIZE:
+            return
+    except ValueError:
+        return
+    displayed = set()
+    best = None
+    for line in _tmux("list-clients", "-F",
+                      "#{window_id} #{client_width} #{client_height}").splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        displayed.add(parts[0])
+        try:
+            cw, ch = int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        if cw and ch and (best is None or cw * ch > best[0] * best[1]):
+            best = (cw, ch)
+    if win_id in displayed:
+        return
+    width, height = best or _FALLBACK_SIZE
+    _tmux("resize-window", "-t", win_id, "-x", str(width), "-y", str(height))
+
 # ---------------------------------------------------------------------------
 # Byobu status line — reads pre-computed cache from /dev/shm
 # ---------------------------------------------------------------------------
@@ -1457,6 +1496,9 @@ class WsHandler(tornado.websocket.WebSocketHandler):
                     if self._stream_task:
                         self._stream_task.cancel()
                         await asyncio.gather(self._stream_task, return_exceptions=True)
+                    # Before the first capture, so the snapshot already has
+                    # the grown geometry.
+                    await asyncio.to_thread(tmux_autosize_window, pane_id)
                     self._stream_pane_id = pane_id
                     self._stream_task = asyncio.ensure_future(
                         self._stream_pane(pane_id, lines, ansi, join, patch)
