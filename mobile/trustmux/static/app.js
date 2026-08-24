@@ -1665,7 +1665,7 @@ document.getElementById('btn-create').addEventListener('click', showCreateOverla
 // one flat indented tree, which turned into a giant scroll with many contexts.
 // _ctxLevel/_ctxSessionId/_ctxWindowId hold where the picker is;
 // showCtxOverlayAt resets them to the requested level on every open.
-let _ctxLevel     = 'windows'; // 'sessions' | 'windows' | 'panes'
+let _ctxLevel     = 'windows'; // 'sessions' | 'windows'
 let _ctxSessionId = null;
 let _ctxWindowId  = null;
 
@@ -1684,7 +1684,7 @@ function _ctxWindowObj() {
 // A snapshot update can leave the picker pointing at a session or
 // window that no longer has live panes; fall back to the level above.
 function _ctxResolveLevel() {
-  if (_ctxLevel === 'panes' && !livePanesInWindow(_ctxWindowObj()).length) _ctxLevel = 'windows';
+  if (_ctxLevel === 'panes') _ctxLevel = 'windows';  // pane level retired
   if (_ctxLevel === 'windows' && !liveWindowsInSession(_ctxSessionObj()).length) _ctxLevel = 'sessions';
 }
 
@@ -1751,29 +1751,16 @@ function renderCtxList() {
     _ctxAddTitle(s.name);
     for (const w of liveWindowsInSession(s)) {
       const isCurrent = s.id === currentSessionId && w.id === currentWindowId;
+      // Windows are the leaves: picking one jumps to its active pane and
+      // closes the drawer. Pane switching within a window belongs to the
+      // status bar's arrow buttons, one level of drilling less per jump.
       const btn = _ctxAddRow(`${w.index}:${w.name}`, isCurrent, () => {
-        _ctxWindowId = w.id;
-        _ctxLevel = 'panes';
-        _ctxRerender(null);
+        hideCtxOverlay();
+        const p = livePanesInWindow(w).find(x => x.active)
+          || firstLivePaneInWindow(w);
+        if (p && !(isCurrent && p.id === currentPane)) navigateTo(s.id, w.id, p.id);
       });
       btn.dataset.ctxId = w.id;
-      btn.dataset.descend = '1';
-    }
-  } else {
-    const s = _ctxSessionObj();
-    const w = _ctxWindowObj();
-    _ctxAddBackRow(s.name, () => {
-      _ctxLevel = 'windows';
-      _ctxRerender(w.id);
-    });
-    _ctxAddTitle(`${w.index}:${w.name}`);
-    for (const p of livePanesInWindow(w)) {
-      const isCurrent = p.id === currentPane;
-      const btn = _ctxAddRow(paneDisplayName(p), isCurrent, () => {
-        hideCtxOverlay();
-        if (!isCurrent) navigateTo(s.id, w.id, p.id);
-      });
-      btn.dataset.ctxId = p.id;
     }
   }
 
@@ -1794,9 +1781,11 @@ function showCtxOverlayAt(level) {
   // Like navigateTo: the keydown dispatch checks scroll mode before the
   // picker, so an open picker under scroll mode would have a dead keyboard.
   if (_scrollMode) exitScrollMode();
-  _ctxLevel     = level;
+  // The drawer stops at windows; a legacy 'panes' request (breadcrumb pane
+  // segment) opens the windows list instead.
+  _ctxLevel     = level === 'panes' ? 'windows' : level;
   _ctxSessionId = currentSessionId;
-  _ctxWindowId  = level === 'panes' ? currentWindowId : null;
+  _ctxWindowId  = null;
   renderCtxList();
   ctxListView.style.display = '';
   ctxRenameForm.style.display = 'none';
@@ -2238,7 +2227,11 @@ async function showInfoPopup() {
     `Connection: ${method}\n` +
     `Latency: ${latencyText}\n` +
     `Connected: ${since}\n` +
-    `Version: ${_versionText}`;
+    `Version: ${_versionText}\n` +
+    // Temporary scroll-debug readout: buffer lines the client holds vs the
+    // output element's scroll geometry.
+    `Debug: lines=${_lines ? _lines.length : '-'} ` +
+    `sh=${output.scrollHeight} ch=${output.clientHeight} st=${Math.round(output.scrollTop)}`;
 
   infoPopupBody.textContent = render(connected ? 'measuring…' : 'not connected');
 
@@ -2652,7 +2645,6 @@ function openCtxPickerKeyboard(level) {
 // Esc or h at a deeper picker level goes up one; returns false at the top so
 // the caller closes instead.
 function ctxPickerUp() {
-  if (_ctxLevel === 'panes')   { _ctxLevel = 'windows';  _ctxRerender(_ctxWindowId);  return true; }
   if (_ctxLevel === 'windows') { _ctxLevel = 'sessions'; _ctxRerender(_ctxSessionId); return true; }
   return false;
 }
@@ -2699,7 +2691,7 @@ function handlePickerKey(e) {
     e.stopPropagation();
     ctxPickerUp();
   } else if (e.key === 'l' || e.key === 'ArrowRight') {
-    // Descend only: pane rows and footer buttons have no descend flag, so l
+    // Descend only: window rows and footer buttons have no descend flag, so l
     // never navigates or closes by accident.
     e.preventDefault();
     e.stopPropagation();
