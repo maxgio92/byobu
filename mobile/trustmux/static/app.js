@@ -2676,11 +2676,7 @@ async function showInfoPopup() {
     `Connection: ${method}\n` +
     `Latency: ${latencyText}\n` +
     `Connected: ${since}\n` +
-    `Version: ${_versionText}\n` +
-    // Temporary scroll-debug readout: buffer lines the client holds vs the
-    // output element's scroll geometry.
-    `Debug: lines=${_lines ? _lines.length : '-'} ` +
-    `sh=${output.scrollHeight} ch=${output.clientHeight} st=${Math.round(output.scrollTop)}`;
+    `Version: ${_versionText}`;
 
   infoPopupBody.textContent = render(connected ? 'measuring…' : 'not connected');
 
